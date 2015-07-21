@@ -14,10 +14,12 @@ import android.widget.Toast;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
-import com.loopj.android.http.JsonHttpResponseHandler;
+import com.squareup.okhttp.Callback;
+import com.squareup.okhttp.Request;
+import com.squareup.okhttp.Response;
 
-import org.apache.http.Header;
 import org.json.JSONArray;
+import org.json.JSONException;
 import org.json.JSONObject;
 import org.wordcamp.android.adapters.WCDetailAdapter;
 import org.wordcamp.android.db.DBCommunicator;
@@ -33,6 +35,8 @@ import org.wordcamp.android.wcdetails.SessionsFragment;
 import org.wordcamp.android.wcdetails.SpeakerFragment;
 import org.wordcamp.android.wcdetails.WordCampOverview;
 
+import java.io.IOException;
+
 /**
  * Created by aagam on 26/1/15.
  */
@@ -44,6 +48,7 @@ public class WordCampDetailActivity extends AppCompatActivity implements Session
     public WordCampDB wcdb;
     public int wcid;
     public DBCommunicator communicator;
+    private WPAPIClient wpapiClient;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -51,6 +56,7 @@ public class WordCampDetailActivity extends AppCompatActivity implements Session
         wcdb = (WordCampDB) getIntent().getSerializableExtra("wc");
         wcid = wcdb.getWc_id();
         setContentView(R.layout.activity_wordcamp_detail);
+        wpapiClient = new WPAPIClient();
         communicator = new DBCommunicator(this);
         communicator.start();
         initGUI();
@@ -132,102 +138,111 @@ public class WordCampDetailActivity extends AppCompatActivity implements Session
     }
 
     private void fetchOverviewAPI() {
-        WPAPIClient.getSingleWC(this, wcid, new JsonHttpResponseHandler() {
+        wpapiClient.getSingleWC(this, wcid, new Callback() {
             @Override
-            public void onSuccess(int statusCode, Header[] headers, JSONObject response) {
-                super.onSuccess(statusCode, headers, response);
-                Gson g = new Gson();
-                WordCampNew wc = g.fromJson(response.toString(), WordCampNew.class);
-                WordCampDB wordCampDB = new WordCampDB(wc, "");
-                communicator.updateWC(wordCampDB);
-
-                WordCampOverview overview = getOverViewFragment();
-                if (overview != null) {
-                    overview.updateData(wordCampDB);
-                    Toast.makeText(getApplicationContext(), getString(R.string.update_overview_toast), Toast.LENGTH_SHORT).show();
-
-                }
-            }
-
-
-            @Override
-            public void onFailure(int statusCode, Header[] headers, Throwable throwable, JSONObject errorResponse) {
-                super.onFailure(statusCode, headers, throwable, errorResponse);
-                Toast.makeText(getApplicationContext(), getApplicationContext().getString(R.string.no_network_toast),
-                        Toast.LENGTH_SHORT).show();
-                WordCampOverview overview = getOverViewFragment();
-                if (overview != null) {
-                    overview.stopRefreshOverview();
-                }
+            public void onFailure(Request request, IOException e) {
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        WordCampOverview overview = getOverViewFragment();
+                        if (overview != null) {
+                            overview.stopRefreshOverview();
+                        }
+                    }
+                });
             }
 
             @Override
-            public void onFailure(int statusCode, Header[] headers, Throwable throwable, JSONArray errorResponse) {
-                super.onFailure(statusCode, headers, throwable, errorResponse);
-                WordCampOverview overview = getOverViewFragment();
-                if (overview != null) {
-                    overview.stopRefreshOverview();
-                }
-            }
+            public void onResponse(Response response) throws IOException {
+                try {
+                    JSONObject object = new JSONObject(response.body().string());
+                    Gson g = new Gson();
+                    WordCampNew wc = g.fromJson(object.toString(), WordCampNew.class);
+                    final WordCampDB wordCampDB = new WordCampDB(wc, "");
 
-            @Override
-            public void onFailure(int statusCode, Header[] headers, String responseString, Throwable throwable) {
-                super.onFailure(statusCode, headers, responseString, throwable);
-                WordCampOverview overview = getOverViewFragment();
-                if (overview != null) {
-                    overview.stopRefreshOverview();
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            communicator.updateWC(wordCampDB);
+                            WordCampOverview overview = getOverViewFragment();
+                            if (overview != null) {
+                                overview.updateData(wordCampDB);
+                                Toast.makeText(getApplicationContext(),
+                                        getString(R.string.update_overview_toast), Toast.LENGTH_SHORT).show();
+                            }
+                        }
+                    });
+                } catch (JSONException e) {
+                    e.printStackTrace();
                 }
+
             }
         });
+
+
     }
 
     private void fetchSessionsAPI(String webURL) {
-        WPAPIClient.getWordCampSchedule(this, webURL, new JsonHttpResponseHandler() {
+        wpapiClient.getWordCampSchedule(this, webURL, new Callback() {
             @Override
-            public void onSuccess(int statusCode, Header[] headers, JSONArray response) {
-                super.onSuccess(statusCode, headers, response);
-                Gson gson = new GsonBuilder().registerTypeHierarchyAdapter(Terms.class,
-                        new CustomGsonDeSerializer()).create();
+            public void onFailure(Request request, IOException e) {
+                if (e == null) {
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            stopRefreshSession();
+                        }
+                    });
+                }
+            }
 
-                for (int i = 0; i < response.length(); i++) {
+            @Override
+            public void onResponse(Response response) throws IOException {
+
+                if (response.isSuccessful()) {
                     try {
-                        Session session = gson.fromJson(response.getJSONObject(i).toString(), Session.class);
-                        if (communicator != null) {
-                            communicator.addSession(session, wcid);
+                        final JSONArray array = new JSONArray(response.body().string());
+                        Gson gson = new GsonBuilder().registerTypeHierarchyAdapter(Terms.class,
+                                new CustomGsonDeSerializer()).create();
+
+                        for (int i = 0; i < array.length(); i++) {
+                            try {
+                                Session session = gson.fromJson(array.getJSONObject(i).toString(), Session.class);
+                                if (communicator != null) {
+                                    communicator.addSession(session, wcid);
+                                }
+                            } catch (Exception e) {
+                                e.printStackTrace();
+                            }
                         }
 
-                    } catch (Exception e) {
+                        runOnUiThread(new Runnable() {
+                            @Override
+                            public void run() {
+                                Toast.makeText(getApplicationContext(), getString(R.string.update_sessions_toast),
+                                        Toast.LENGTH_SHORT).show();
+                                stopRefreshSession();
+                                if (array.length() > 0) {
+                                    updateSessionContent();
+                                }
+                            }
+                        });
+
+                    } catch (JSONException e) {
                         e.printStackTrace();
                     }
+                } else {
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            stopRefreshSession();
+                        }
+                    });
                 }
-
-                Toast.makeText(getApplicationContext(), getString(R.string.update_sessions_toast), Toast.LENGTH_SHORT).show();
-                stopRefreshSession();
-                if (response.length() > 0) {
-                    updateSessionContent();
-                }
             }
 
-            @Override
-            public void onFailure(int statusCode, Header[] headers, Throwable throwable, JSONArray errorResponse) {
-                super.onFailure(statusCode, headers, throwable, errorResponse);
-                stopRefreshSession();
-            }
-
-            @Override
-            public void onFailure(int statusCode, Header[] headers, Throwable throwable, JSONObject errorResponse) {
-                super.onFailure(statusCode, headers, throwable, errorResponse);
-                Toast.makeText(getApplicationContext(), getApplicationContext().getString(R.string.no_network_toast),
-                        Toast.LENGTH_SHORT).show();
-                stopRefreshSession();
-            }
-
-            @Override
-            public void onFailure(int statusCode, Header[] headers, String responseString, Throwable throwable) {
-                super.onFailure(statusCode, headers, responseString, throwable);
-                stopRefreshSession();
-            }
         });
+
     }
 
     private void stopRefreshSession() {
@@ -254,31 +269,47 @@ public class WordCampDetailActivity extends AppCompatActivity implements Session
     }
 
     private void fetchSpeakersAPI(String webURL) {
-        WPAPIClient.getWordCampSpeakers(this, webURL, new JsonHttpResponseHandler() {
+        wpapiClient.getWordCampSpeakers(this, webURL, new Callback() {
             @Override
-            public void onSuccess(int statusCode, Header[] headers, JSONArray response) {
-                super.onSuccess(statusCode, headers, response);
-                addUpdateSpeakers(response);
+            public void onFailure(Request request, IOException e) {
+
+                if (e == null) {
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            Toast.makeText(getApplicationContext(), getApplicationContext().getString(R.string.no_network_toast),
+                                    Toast.LENGTH_SHORT).show();
+                            stopRefreshSpeaker();
+                        }
+                    });
+                }
             }
 
             @Override
-            public void onFailure(int statusCode, Header[] headers, Throwable throwable, JSONArray errorResponse) {
-                super.onFailure(statusCode, headers, throwable, errorResponse);
-                stopRefreshSpeaker();
-            }
+            public void onResponse(Response response) {
 
-            @Override
-            public void onFailure(int statusCode, Header[] headers, Throwable throwable, JSONObject errorResponse) {
-                super.onFailure(statusCode, headers, throwable, errorResponse);
-                Toast.makeText(getApplicationContext(), getApplicationContext().getString(R.string.no_network_toast),
-                        Toast.LENGTH_SHORT).show();
-                stopRefreshSpeaker();
-            }
-
-            @Override
-            public void onFailure(int statusCode, Header[] headers, String responseString, Throwable throwable) {
-                super.onFailure(statusCode, headers, responseString, throwable);
-                stopRefreshSpeaker();
+                if (response.isSuccessful()) {
+                    try {
+                        final JSONArray array = new JSONArray(response.body().string());
+                        runOnUiThread(new Runnable() {
+                            @Override
+                            public void run() {
+                                addUpdateSpeakers(array);
+                            }
+                        });
+                    } catch (Exception e) {
+                        e.printStackTrace();
+                    }
+                } else {
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            Toast.makeText(getApplicationContext(), getApplicationContext().getString(R.string.no_network_toast),
+                                    Toast.LENGTH_SHORT).show();
+                            stopRefreshSpeaker();
+                        }
+                    });
+                }
             }
         });
     }
@@ -338,7 +369,13 @@ public class WordCampDetailActivity extends AppCompatActivity implements Session
     @Override
     public void onPause() {
         super.onPause();
-        WPAPIClient.cancelAllRequests(this);
+
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                wpapiClient.cancelAllRequests();
+            }
+        }).start();
         if (communicator != null)
             communicator.close();
     }
@@ -346,7 +383,12 @@ public class WordCampDetailActivity extends AppCompatActivity implements Session
     @Override
     protected void onStop() {
         super.onStop();
-        WPAPIClient.cancelAllRequests(this);
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                wpapiClient.cancelAllRequests();
+            }
+        }).start();
     }
 
     @Override
